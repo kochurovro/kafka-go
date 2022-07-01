@@ -1321,6 +1321,12 @@ func (r *reader) run(ctx context.Context, offset int64) {
 				errcount = 0
 				continue
 
+			case errors.Is(err, io.ErrNoProgress):
+				// This error seems to indicate that the reader is not finding new data,
+				// but that could just mean there is no data to consume right now, so we
+				// will retry rather than treating as a failure.
+				continue
+
 			case errors.Is(err, UnknownTopicOrPartition):
 				r.withErrorLogger(func(log Logger) {
 					log.Printf("failed to read from current broker for partition %d of %s at offset %d, topic or parition not found on this broker, %v", r.partition, r.topic, toHumanOffset(offset), r.brokers)
