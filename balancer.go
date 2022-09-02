@@ -293,6 +293,85 @@ func (b Murmur2Balancer) Balance(msg Message, partitions ...int) (partition int)
 	return partitions[idx]
 }
 
+// Sticky Balancer is an Balancer implementation that picking a single partition
+// to send all non-keyed records. Once the batch at that partition is filled or
+// otherwise completed, the sticky partitioner randomly chooses and
+// “sticks” to a new partition.
+//
+// NOTE: https://www.confluent.io/blog/apache-kafka-producer-improvements-sticky-partitioner/
+type StickyPartitioner struct {
+	batchBytesSize int64
+	batchSize      int64
+
+	cache stickyChache
+}
+
+type stickyChache struct {
+	lock sync.RWMutex
+
+	indexCache map[string]partition
+}
+
+type partition struct {
+	index int
+
+	batchBytesSize int64
+	batchSize      int64
+}
+
+func (sc *stickyChache) getIndex(msg Message) (*partition, bool) {
+	sc.lock.RLock()
+	defer sc.lock.RUnlock()
+
+	p, ok := sc.indexCache[msg.Topic]
+	if !ok {
+		return &p, ok
+	}
+
+	if atomic.AddInt64(&p.batchBytesSize, int64(-1*msg.size())) < 0 {
+		return &p, false
+	}
+
+	if atomic.AddInt64(&p.batchSize, -1) < 0 {
+		return &p, false
+	}
+
+	return &p, ok
+}
+
+func (sc *stickyChache) setIndex(topic string, index int, batchBytesSize, batchSize int64) {
+	sc.lock.Lock()
+	defer sc.lock.Unlock()
+	sc.indexCache[topic] = partition{
+		index:          index,
+		batchBytesSize: batchBytesSize,
+		batchSize:      batchSize,
+	}
+}
+
+func (sb *StickyPartitioner) Balance(msg Message, partitions ...int) (partition int) {
+	if len(partitions) == 1 {
+		return partitions[0]
+	}
+
+	i, ok := sb.cache.getIndex(msg)
+	if ok {
+		return partitions[i.index]
+	}
+
+	index := rand.Intn(len(partitions))
+	for i != nil && i.index != index {
+		index = rand.Intn(len(partitions))
+	}
+
+	sb.cache.setIndex(msg.Topic,
+		partitions[index], sb.batchBytesSize, sb.batchSize)
+
+	return partitions[index]
+}
+
+// default public void onNewBatch(String topic, Cluster cluster, int prevPartition) {
+
 // Go port of the Java library's murmur2 function.
 // https://github.com/apache/kafka/blob/1.0/clients/src/main/java/org/apache/kafka/common/utils/Utils.java#L353
 func murmur2(data []byte) uint32 {
