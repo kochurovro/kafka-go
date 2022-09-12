@@ -300,77 +300,45 @@ func (b Murmur2Balancer) Balance(msg Message, partitions ...int) (partition int)
 //
 // NOTE: https://www.confluent.io/blog/apache-kafka-producer-improvements-sticky-partitioner/
 type StickyPartitioner struct {
-	batchBytesSize int64
-	batchSize      int64
+	lock *sync.Mutex
 
-	cache stickyChache
-}
-
-type stickyChache struct {
-	lock sync.RWMutex
-
-	indexCache map[string]partition
-}
-
-type partition struct {
 	index int
 
+	defaultBatchBytesSize int64
+	defaultBatchSize      int64
+
 	batchBytesSize int64
 	batchSize      int64
 }
 
-func (sc *stickyChache) getIndex(msg Message) (*partition, bool) {
-	sc.lock.RLock()
-	defer sc.lock.RUnlock()
-
-	p, ok := sc.indexCache[msg.Topic]
-	if !ok {
-		return &p, ok
-	}
-
-	if atomic.AddInt64(&p.batchBytesSize, int64(-1*msg.size())) < 0 {
-		return &p, false
-	}
-
-	if atomic.AddInt64(&p.batchSize, -1) < 0 {
-		return &p, false
-	}
-
-	return &p, ok
-}
-
-func (sc *stickyChache) setIndex(topic string, index int, batchBytesSize, batchSize int64) {
+func (sc *StickyPartitioner) nextIndex(msg Message, lenPartitions int) int {
 	sc.lock.Lock()
 	defer sc.lock.Unlock()
-	sc.indexCache[topic] = partition{
-		index:          index,
-		batchBytesSize: batchBytesSize,
-		batchSize:      batchSize,
+
+	sc.batchBytesSize = sc.batchBytesSize - int64(msg.size())
+	sc.batchSize = sc.batchSize - 1
+
+	if sc.batchBytesSize < 0 || sc.batchSize < 0 {
+		sc.batchBytesSize = sc.defaultBatchBytesSize
+		sc.batchSize = sc.defaultBatchSize
+
+		if sc.index++; sc.index > lenPartitions-1 {
+			sc.index = 0
+		}
+
+		return sc.index
 	}
+
+	return sc.index
 }
 
-func (sb *StickyPartitioner) Balance(msg Message, partitions ...int) (partition int) {
+func (sp *StickyPartitioner) Balance(msg Message, partitions ...int) (partition int) {
 	if len(partitions) == 1 {
 		return partitions[0]
 	}
 
-	i, ok := sb.cache.getIndex(msg)
-	if ok {
-		return partitions[i.index]
-	}
-
-	index := rand.Intn(len(partitions))
-	for i != nil && i.index != index {
-		index = rand.Intn(len(partitions))
-	}
-
-	sb.cache.setIndex(msg.Topic,
-		partitions[index], sb.batchBytesSize, sb.batchSize)
-
-	return partitions[index]
+	return partitions[sp.nextIndex(msg, len(partitions))]
 }
-
-// default public void onNewBatch(String topic, Cluster cluster, int prevPartition) {
 
 // Go port of the Java library's murmur2 function.
 // https://github.com/apache/kafka/blob/1.0/clients/src/main/java/org/apache/kafka/common/utils/Utils.java#L353
