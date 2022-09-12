@@ -293,6 +293,53 @@ func (b Murmur2Balancer) Balance(msg Message, partitions ...int) (partition int)
 	return partitions[idx]
 }
 
+// Sticky Balancer is an Balancer implementation that picking a single partition
+// to send all non-keyed records. Once the batch at that partition is filled or
+// otherwise completed, the sticky partitioner randomly chooses and
+// “sticks” to a new partition.
+//
+// NOTE: https://www.confluent.io/blog/apache-kafka-producer-improvements-sticky-partitioner/
+type StickyPartitioner struct {
+	lock *sync.Mutex
+
+	index int
+
+	defaultBatchBytesSize int64
+	defaultBatchSize      int64
+
+	batchBytesSize int64
+	batchSize      int64
+}
+
+func (sc *StickyPartitioner) nextIndex(msg Message, lenPartitions int) int {
+	sc.lock.Lock()
+	defer sc.lock.Unlock()
+
+	sc.batchBytesSize = sc.batchBytesSize - int64(msg.size())
+	sc.batchSize = sc.batchSize - 1
+
+	if sc.batchBytesSize < 0 || sc.batchSize < 0 {
+		sc.batchBytesSize = sc.defaultBatchBytesSize
+		sc.batchSize = sc.defaultBatchSize
+
+		if sc.index++; sc.index > lenPartitions-1 {
+			sc.index = 0
+		}
+
+		return sc.index
+	}
+
+	return sc.index
+}
+
+func (sp *StickyPartitioner) Balance(msg Message, partitions ...int) (partition int) {
+	if len(partitions) == 1 {
+		return partitions[0]
+	}
+
+	return partitions[sp.nextIndex(msg, len(partitions))]
+}
+
 // Go port of the Java library's murmur2 function.
 // https://github.com/apache/kafka/blob/1.0/clients/src/main/java/org/apache/kafka/common/utils/Utils.java#L353
 func murmur2(data []byte) uint32 {
